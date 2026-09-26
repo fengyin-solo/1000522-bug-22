@@ -30,6 +30,23 @@ def list_entries(
     return PageResult(items=items, total=total, page=page, size=size)
 
 
+@router.get("/stats", response_model=dict)
+def list_stats(
+    keyword: str | None = Query(default=None, description="按设备编号检索"),
+    status: str | None = Query(default=None, description="待测试、运用正常、分路不良、已更换"),
+) -> dict[str, int]:
+    """按当前筛选条件实时汇总在运、分路不良与待测试数量，口径与列表完全一致。"""
+    filtered, _ = service.list_entries(keyword=keyword, status=status, page=1, size=10000)
+    return service.summarize(filtered)
+
+
+@router.get("/export")
+def export_entries() -> dict[str, Any]:
+    """导出轨道电路清单：返回当前过滤条件下的全量数据。"""
+    items, total = service.list_entries(page=1, size=10000)
+    return {"module": "track", "total": total, "items": items, "stats": service.summarize(items)}
+
+
 @router.get("/{entry_id}", response_model=dict)
 def get_entry(entry_id: int) -> dict:
     """读取单条轨道电路明细；不存在时给出可读的错误说明。"""
@@ -56,10 +73,3 @@ def run_action(entry_id: int, payload: EntryPayload) -> ActionResult:
     if entry is None:
         return ActionResult(ok=False, message=message)
     return ActionResult(ok=True, message=message, entry=entry)
-
-
-@router.get("/export")
-def export_entries() -> dict[str, Any]:
-    """导出轨道电路清单：返回当前过滤条件下的全量数据。"""
-    items, total = service.list_entries(page=1, size=10000)
-    return {"module": "track", "total": total, "items": items}

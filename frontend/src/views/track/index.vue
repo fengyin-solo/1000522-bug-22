@@ -36,8 +36,14 @@
       </thead>
       <tbody>
         <tr v-for="row in rows" :key="String(row.id)">
-          <td v-for="column in columns" :key="column">{{ row[column] ?? '—' }}</td>
+          <template v-for="column in columns" :key="column">
+            <td v-if="column === '设备状态'">
+              <span class="status-tag" :class="badgeClass(String(row[column] ?? ''))">{{ row[column] ?? '—' }}</span>
+            </td>
+            <td v-else>{{ row[column] ?? '—' }}</td>
+          </template>
           <td class="row-actions">
+            <button class="link" type="button" @click="openDetail(row)">详情</button>
             <button
               v-for="action in actions"
               :key="action"
@@ -57,29 +63,82 @@
 
     <footer class="page-foot">
       <span>共 {{ total }} 条轨道电路记录</span>
+      <span v-if="infoMessage" class="info-text">{{ infoMessage }}</span>
       <span v-if="errorMessage" class="error-text">{{ errorMessage }}</span>
     </footer>
+
+    <div v-if="detail" class="modal-mask" @click.self="closeDetail">
+      <div class="modal-card">
+        <header class="modal-head">
+          <h3>轨道电路详情 · {{ detail['设备编号'] }}</h3>
+          <button class="link" type="button" @click="closeDetail">关闭</button>
+        </header>
+        <dl class="detail-grid">
+          <div v-for="column in detailColumns" :key="column" class="detail-item">
+            <dt>{{ column }}</dt>
+            <dd v-if="column === '设备状态'">
+              <span class="status-tag" :class="badgeClass(String(detail[column] ?? ''))">{{ detail[column] ?? '—' }}</span>
+            </dd>
+            <dd v-else>{{ detail[column] ?? '—' }}</dd>
+          </div>
+          <div class="detail-item">
+            <dt>测试结论</dt>
+            <dd>
+              <span v-if="detail['测试结论']" class="status-tag" :class="badgeClass(conclusionLabel(String(detail['测试结论'])))">
+                {{ detail['测试结论'] }}
+              </span>
+              <span v-else>—</span>
+            </dd>
+          </div>
+        </dl>
+      </div>
+    </div>
   </section>
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 
 import { request } from '@/api/client'
 
-type Row = Record<string, string | number | null>
+type Row = Record<string, string | number | boolean | null>
 
 const ENDPOINT = '/api/track'
 const columns = ["设备编号", "制式类型", "区段长度", "分路灵敏度", "所属区段", "上次测试日", "下次测试日", "设备状态"]
+const detailColumns = columns.slice()
 const actions = ["提交测试", "确认正常", "更换设备"]
-const statuses = ["待测试", "运用正常", "分路不良", "已更换"]
-const stats = [{"label": "在运轨道电路", "value": 0}, {"label": "分路不良区段", "value": 0}, {"label": "待测试设备", "value": 0}]
+const filterFields = columns.slice(0, 3)
 
 const rows = ref<Row[]>([])
 const total = ref(0)
 const errorMessage = ref('')
+const infoMessage = ref('')
 const filters = ref<Record<string, string>>({})
-const filterFields = columns.slice(0, 3)
+const detail = ref<Row | null>(null)
+
+const stats = computed(() => {
+  const statusOf = (row: Row) => String(row['设备状态'] ?? row.status ?? '')
+  const active = rows.value.filter((row) => ['运用正常', '分路不良'].includes(statusOf(row))).length
+  const bad = rows.value.filter((row) => statusOf(row) === '分路不良').length
+  const pending = rows.value.filter((row) => statusOf(row) === '待测试').length
+  return [
+    { label: '在运轨道电路', value: active },
+    { label: '分路不良区段', value: bad },
+    { label: '待测试设备', value: pending },
+  ]
+})
+
+function badgeClass(status: string) {
+  if (status === '分路不良' || status === '不合格') return 'status-bad'
+  if (status === '运用正常' || status === '合格') return 'status-ok'
+  if (status === '已更换') return 'status-done'
+  return 'status-pending'
+}
+
+function conclusionLabel(conclusion: string) {
+  // 测试结论（合格/不合格）复用同一套颜色规则
+  return conclusion === '不合格' ? '分路不良' : conclusion === '合格' ? '运用正常' : conclusion
+}
 
 function resetFilters() {
   filters.value = {}
@@ -94,16 +153,42 @@ function openCreate() {
   errorMessage.value = '轨道电路登记入口尚未接入审批流'
 }
 
+function closeDetail() {
+  detail.value = null
+}
+
+async function openDetail(row: Row) {
+  errorMessage.value = ''
+  try {
+    const response = await request(`${ENDPOINT}/${row.id}`)
+    if (!response.ok) {
+      throw new Error('轨道电路详情读取失败')
+    }
+    detail.value = await response.json()
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '轨道电路详情读取失败'
+  }
+}
+
 async function runAction(action: string, row: Row) {
   errorMessage.value = ''
+  infoMessage.value = ''
   try {
     const response = await request(`${ENDPOINT}/${row.id}/actions`, {
       method: 'POST',
       body: JSON.stringify({ action }),
     })
-    if (!response.ok) {
-      throw new Error('轨道电路动作未生效，请稍后重试')
+    let payload: { ok?: boolean; message?: string } = {}
+    try {
+      payload = await response.json()
+    } catch {
+      payload = {}
     }
+    // 服务端业务校验结论（ok/message）与页面保持一致：失败时原样展示，不刷新成旧状态
+    if (!response.ok || payload.ok === false) {
+      throw new Error(payload.message || '轨道电路动作未生效，请稍后重试')
+    }
+    infoMessage.value = payload.message || '轨道电路动作已生效'
     await reload()
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '轨道电路操作失败'
@@ -112,6 +197,7 @@ async function runAction(action: string, row: Row) {
 
 async function reload() {
   errorMessage.value = ''
+  infoMessage.value = ''
   const query = new URLSearchParams(filters.value as Record<string, string>).toString()
   try {
     const response = await request(`${ENDPOINT}?${query}`)
